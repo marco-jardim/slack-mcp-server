@@ -97,6 +97,8 @@ func TestValidToolNames(t *testing.T) {
 			ToolConversationsHistory:        true,
 			ToolConversationsReplies:        true,
 			ToolConversationsAddMessage:     true,
+			ToolConversationsUpdateMessage:  true,
+			ToolConversationsDeleteMessage:  true,
 			ToolReactionsAdd:                true,
 			ToolReactionsRemove:             true,
 			ToolAttachmentGetData:           true,
@@ -129,6 +131,8 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "conversations_history", ToolConversationsHistory)
 		assert.Equal(t, "conversations_replies", ToolConversationsReplies)
 		assert.Equal(t, "conversations_add_message", ToolConversationsAddMessage)
+		assert.Equal(t, "conversations_update_message", ToolConversationsUpdateMessage)
+		assert.Equal(t, "conversations_delete_message", ToolConversationsDeleteMessage)
 		assert.Equal(t, "reactions_add", ToolReactionsAdd)
 		assert.Equal(t, "reactions_remove", ToolReactionsRemove)
 		assert.Equal(t, "attachment_get_data", ToolAttachmentGetData)
@@ -251,6 +255,76 @@ func TestShouldAddTool_WriteTool_AddMessage(t *testing.T) {
 
 		result := shouldAddTool(ToolConversationsAddMessage, []string{ToolConversationsHistory}, "SLACK_MCP_ADD_MESSAGE_TOOL")
 		assert.False(t, result, "write tool should NOT be registered when not in explicit enabledTools list")
+	})
+}
+
+func TestShouldAddTool_WriteTool_UpdateDeleteMessage(t *testing.T) {
+	messageWriteTools := []string{ToolConversationsUpdateMessage, ToolConversationsDeleteMessage}
+
+	t.Run("empty enabledTools and empty env var - not registered", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "")
+		defer cleanup()
+
+		for _, tool := range messageWriteTools {
+			result := shouldAddTool(tool, []string{}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			assert.False(t, result, "%s should NOT be registered when both enabledTools is empty and env var is not set", tool)
+		}
+	})
+
+	t.Run("empty enabledTools and env var set to true - registered", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
+		defer cleanup()
+
+		for _, tool := range messageWriteTools {
+			result := shouldAddTool(tool, []string{}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			assert.True(t, result, "%s should be registered when enabledTools is empty but env var is set", tool)
+		}
+	})
+
+	t.Run("empty enabledTools and env var set to channel list - registered", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "C123,C456")
+		defer cleanup()
+
+		for _, tool := range messageWriteTools {
+			result := shouldAddTool(tool, []string{}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			assert.True(t, result, "%s should be registered when enabledTools is empty but env var has channel list", tool)
+		}
+	})
+
+	t.Run("registered exactly when conversations_add_message is registered", func(t *testing.T) {
+		for _, envValue := range []string{"", "true", "C123", "!C123"} {
+			cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", envValue)
+			addMessage := shouldAddTool(ToolConversationsAddMessage, []string{}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			for _, tool := range messageWriteTools {
+				result := shouldAddTool(tool, []string{}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+				assert.Equal(t, addMessage, result, "%s registration should match conversations_add_message for env value %q", tool, envValue)
+			}
+			cleanup()
+		}
+	})
+
+	t.Run("explicit enabledTools includes tool and empty env var - registered", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "")
+		defer cleanup()
+
+		for _, tool := range messageWriteTools {
+			result := shouldAddTool(tool, []string{tool}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			assert.True(t, result, "%s should be registered when explicitly in enabledTools even without env var", tool)
+		}
+	})
+
+	t.Run("explicit enabledTools excludes tool - not registered even with env var", func(t *testing.T) {
+		cleanup := setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
+		defer cleanup()
+
+		for _, tool := range messageWriteTools {
+			result := shouldAddTool(tool, []string{ToolConversationsAddMessage}, "SLACK_MCP_ADD_MESSAGE_TOOL")
+			assert.False(t, result, "%s should NOT be registered when not in explicit enabledTools list", tool)
+		}
+	})
+
+	t.Run("tool names are accepted by ValidateEnabledTools", func(t *testing.T) {
+		assert.NoError(t, ValidateEnabledTools(messageWriteTools))
 	})
 }
 

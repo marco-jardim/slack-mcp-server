@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/csv"
+	"errors"
 	"fmt"
 	"os"
 	"regexp"
@@ -12,13 +13,17 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/korotovsky/slack-mcp-server/pkg/provider"
 	"github.com/korotovsky/slack-mcp-server/pkg/test/util"
+	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/openai/openai-go"
 	"github.com/openai/openai-go/option"
 	"github.com/openai/openai-go/packages/param"
 	"github.com/openai/openai-go/responses"
+	"github.com/slack-go/slack"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
 
 func TestIntegrationConversations(t *testing.T) {
@@ -652,4 +657,467 @@ func TestUnitIsSlackUserIDPrefix(t *testing.T) {
 			}
 		})
 	}
+}
+
+// fakeMessageWriteSlackAPI is an in-memory provider.SlackAPI for the message write tool
+// tests. Only the methods used by conversations_update_message and
+// conversations_delete_message are implemented; calling any other method panics.
+type fakeMessageWriteSlackAPI struct {
+	provider.SlackAPI
+
+	historyMessages []slack.Message
+	historyErr      error
+	replyMessages   []slack.Message
+	repliesErr      error
+
+	historyParams *slack.GetConversationHistoryParameters
+	repliesParams *slack.GetConversationRepliesParameters
+
+	historyCalls int
+	repliesCalls int
+	updateCalls  int
+	deleteCalls  int
+}
+
+func (f *fakeMessageWriteSlackAPI) GetConversationHistoryContext(_ context.Context, params *slack.GetConversationHistoryParameters) (*slack.GetConversationHistoryResponse, error) {
+	f.historyCalls++
+	f.historyParams = params
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+	return &slack.GetConversationHistoryResponse{Messages: f.historyMessages}, nil
+}
+
+func (f *fakeMessageWriteSlackAPI) GetConversationRepliesContext(_ context.Context, params *slack.GetConversationRepliesParameters) ([]slack.Message, bool, string, error) {
+	f.repliesCalls++
+	f.repliesParams = params
+	if f.repliesErr != nil {
+		return nil, false, "", f.repliesErr
+	}
+	return f.replyMessages, false, "", nil
+}
+
+func (f *fakeMessageWriteSlackAPI) UpdateMessageContext(_ context.Context, channelID, timestamp string, _ ...slack.MsgOption) (string, string, string, error) {
+	f.updateCalls++
+	return channelID, timestamp, "", nil
+}
+
+func (f *fakeMessageWriteSlackAPI) DeleteMessageContext(_ context.Context, channel, messageTimestamp string) (string, string, error) {
+	f.deleteCalls++
+	return channel, messageTimestamp, nil
+}
+
+func newMessageWriteRequest(args map[string]any) mcp.CallToolRequest {
+	var request mcp.CallToolRequest
+	request.Params.Arguments = args
+	return request
+}
+
+func newMessageWriteTestHandler() *ConversationsHandler {
+	return &ConversationsHandler{logger: zap.NewNop()}
+}
+
+func slackMessage(user, ts string) slack.Message {
+	return slack.Message{Msg: slack.Msg{User: user, Timestamp: ts}}
+}
+
+func TestUnitMessageWriteToolsChannelPolicy(t *testing.T) {
+	const ts = "1700000000.000100"
+
+	parsers := map[string]func(ch *ConversationsHandler, request mcp.CallToolRequest) error{
+		updateMessageToolName: func(ch *ConversationsHandler, request mcp.CallToolRequest) error {
+			_, err := ch.parseParamsToolUpdateMessage(context.Background(), request)
+			return err
+		},
+		deleteMessageToolName: func(ch *ConversationsHandler, request mcp.CallToolRequest) error {
+			_, err := ch.parseParamsToolDeleteMessage(context.Background(), request)
+			return err
+		},
+	}
+
+	for toolName, parse := range parsers {
+		t.Run(toolName+" refuses a channel outside the allowlist", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "C111")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C999",
+				"ts":         ts,
+				"text":       "edited",
+			}))
+			require.Error(t, err)
+			assert.Equal(t,
+				fmt.Sprintf("%s tool is not allowed for channel %q, applied policy: %s", toolName, "C999", "C111"),
+				err.Error())
+		})
+
+		t.Run(toolName+" refuses a blocklisted channel", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "!C999")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C999",
+				"ts":         ts,
+				"text":       "edited",
+			}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "tool is not allowed for channel \"C999\"")
+		})
+
+		t.Run(toolName+" accepts a channel in the allowlist", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "C111,C222")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C222",
+				"ts":         ts,
+				"text":       "edited",
+			}))
+			assert.NoError(t, err)
+		})
+
+		t.Run(toolName+" is disabled when SLACK_MCP_ADD_MESSAGE_TOOL is empty", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C111",
+				"ts":         ts,
+				"text":       "edited",
+			}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "by default, the "+toolName+" tool is disabled")
+		})
+
+		t.Run(toolName+" is allowed for all channels when listed in SLACK_MCP_ENABLED_TOOLS", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "conversations_history,"+toolName)
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C111",
+				"ts":         ts,
+				"text":       "edited",
+			}))
+			assert.NoError(t, err)
+		})
+
+		t.Run(toolName+" requires a valid ts", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C111",
+				"text":       "edited",
+			}))
+			require.Error(t, err)
+			assert.Equal(t, "ts must be a string", err.Error())
+
+			err = parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"channel_id": "C111",
+				"ts":         "1700000000",
+				"text":       "edited",
+			}))
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "ts must be a valid timestamp")
+		})
+
+		t.Run(toolName+" requires channel_id", func(t *testing.T) {
+			t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
+			t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+			err := parse(newMessageWriteTestHandler(), newMessageWriteRequest(map[string]any{
+				"ts":   ts,
+				"text": "edited",
+			}))
+			require.Error(t, err)
+			assert.Equal(t, "channel_id must be a string", err.Error())
+		})
+	}
+}
+
+func TestUnitParseParamsToolUpdateMessage(t *testing.T) {
+	const ts = "1700000000.000100"
+	t.Setenv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")
+	t.Setenv("SLACK_MCP_ENABLED_TOOLS", "")
+
+	t.Run("requires text or blocks", func(t *testing.T) {
+		_, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+		}))
+		require.Error(t, err)
+		assert.Equal(t, "either text or blocks must be provided", err.Error())
+	})
+
+	t.Run("empty text and empty blocks are rejected", func(t *testing.T) {
+		_, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"text":       "",
+			"blocks":     "",
+		}))
+		require.Error(t, err)
+		assert.Equal(t, "either text or blocks must be provided", err.Error())
+	})
+
+	t.Run("text only is accepted with the default content type", func(t *testing.T) {
+		params, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"text":       "edited",
+		}))
+		require.NoError(t, err)
+		assert.Equal(t, "C111", params.channel)
+		assert.Equal(t, ts, params.ts)
+		assert.Equal(t, "edited", params.text)
+		assert.Equal(t, "text/markdown", params.contentType)
+		assert.Nil(t, params.blocks)
+	})
+
+	t.Run("text is sanitised to Slack mrkdwn for both content types", func(t *testing.T) {
+		for _, contentType := range []string{"text/markdown", "text/plain"} {
+			params, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+				"channel_id":   "C111",
+				"ts":           ts,
+				"text":         "**done** & [docs](https://example.com)",
+				"content_type": contentType,
+			}))
+			require.NoError(t, err)
+			assert.Equal(t, "*done* &amp; <https://example.com|docs>", params.text, contentType)
+		}
+	})
+
+	t.Run("mrkdwn text objects inside blocks are sanitised", func(t *testing.T) {
+		params, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"blocks":     `[{"type":"section","text":{"type":"mrkdwn","text":"**bold**"}}]`,
+		}))
+		require.NoError(t, err)
+		require.Len(t, params.blocks, 1)
+		section, ok := params.blocks[0].(*slack.SectionBlock)
+		require.True(t, ok)
+		assert.Equal(t, "*bold*", section.Text.Text)
+	})
+
+	t.Run("blocks only are accepted as a JSON string", func(t *testing.T) {
+		params, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"blocks":     `[{"type":"divider"}]`,
+		}))
+		require.NoError(t, err)
+		assert.Len(t, params.blocks, 1)
+		assert.Equal(t, "", params.text)
+	})
+
+	t.Run("blocks only are accepted as a raw JSON array", func(t *testing.T) {
+		params, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"blocks":     []any{map[string]any{"type": "divider"}},
+		}))
+		require.NoError(t, err)
+		assert.Len(t, params.blocks, 1)
+	})
+
+	t.Run("invalid blocks JSON is rejected", func(t *testing.T) {
+		_, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id": "C111",
+			"ts":         ts,
+			"blocks":     `not json`,
+		}))
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "blocks must be valid Slack Block Kit JSON")
+	})
+
+	t.Run("invalid content type is rejected", func(t *testing.T) {
+		_, err := newMessageWriteTestHandler().parseParamsToolUpdateMessage(context.Background(), newMessageWriteRequest(map[string]any{
+			"channel_id":   "C111",
+			"ts":           ts,
+			"text":         "edited",
+			"content_type": "text/html",
+		}))
+		require.Error(t, err)
+		assert.Equal(t, "content_type must be either 'text/plain' or 'text/markdown'", err.Error())
+	})
+}
+
+func TestUnitBuildUpdateMessageOptions(t *testing.T) {
+	ch := newMessageWriteTestHandler()
+	divider := []slack.Block{slack.NewDividerBlock()}
+
+	t.Run("blocks take precedence and text becomes the fallback", func(t *testing.T) {
+		options, err := ch.buildUpdateMessageOptions(&updateMessageParams{text: "fallback", contentType: "text/plain", blocks: divider})
+		require.NoError(t, err)
+		assert.Len(t, options, 2)
+	})
+
+	t.Run("blocks without text", func(t *testing.T) {
+		options, err := ch.buildUpdateMessageOptions(&updateMessageParams{contentType: "text/markdown", blocks: divider})
+		require.NoError(t, err)
+		assert.Len(t, options, 1)
+	})
+
+	t.Run("plain text clears previous blocks", func(t *testing.T) {
+		options, err := ch.buildUpdateMessageOptions(&updateMessageParams{text: "edited", contentType: "text/plain"})
+		require.NoError(t, err)
+		assert.Len(t, options, 2)
+	})
+
+	t.Run("markdown text is sent as mrkdwn text and clears previous blocks", func(t *testing.T) {
+		options, err := ch.buildUpdateMessageOptions(&updateMessageParams{text: "*edited*", contentType: "text/markdown"})
+		require.NoError(t, err)
+		assert.Len(t, options, 2)
+	})
+
+	t.Run("unknown content type", func(t *testing.T) {
+		_, err := ch.buildUpdateMessageOptions(&updateMessageParams{text: "edited", contentType: "text/html"})
+		require.Error(t, err)
+	})
+}
+
+func TestUnitMessageWriteOwnershipGuard(t *testing.T) {
+	const (
+		channel = "C123"
+		ts      = "1700000000.000100"
+		me      = "U_ME"
+		other   = "U_OTHER"
+	)
+	notOwned := fmt.Sprintf("refusing to modify message %s in %s: not authored by the authenticated user", ts, channel)
+	updateParams := &updateMessageParams{channel: channel, ts: ts, text: "edited", contentType: "text/plain"}
+	deleteParams := &deleteMessageParams{channel: channel, ts: ts}
+
+	t.Run("update refuses a message authored by another user", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyMessages: []slack.Message{slackMessage(other, ts)}}
+
+		result, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, me, updateParams)
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.Equal(t, notOwned, err.Error())
+		assert.Equal(t, 0, client.updateCalls, "chat.update must not be called for a message that is not owned")
+	})
+
+	t.Run("delete refuses a message authored by another user", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyMessages: []slack.Message{slackMessage(other, ts)}}
+
+		result, err := newMessageWriteTestHandler().deleteOwnMessage(context.Background(), client, me, deleteParams)
+		require.Error(t, err)
+		assert.Nil(t, result)
+		assert.Equal(t, notOwned, err.Error())
+		assert.Equal(t, 0, client.deleteCalls, "chat.delete must not be called for a message that is not owned")
+	})
+
+	t.Run("bot or system message without a user is refused", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyMessages: []slack.Message{slackMessage("", ts)}}
+
+		_, err := newMessageWriteTestHandler().deleteOwnMessage(context.Background(), client, me, deleteParams)
+		require.Error(t, err)
+		assert.Equal(t, notOwned, err.Error())
+		assert.Equal(t, 0, client.deleteCalls)
+	})
+
+	t.Run("unknown authenticated user is refused without any API call", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyMessages: []slack.Message{slackMessage("", ts)}}
+
+		_, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, "", updateParams)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "the authenticated user is unknown")
+		assert.Equal(t, 0, client.historyCalls)
+		assert.Equal(t, 0, client.updateCalls)
+	})
+
+	t.Run("update edits an own top-level message", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyMessages: []slack.Message{slackMessage(me, ts)}}
+
+		result, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, me, updateParams)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, 1, client.updateCalls)
+		assert.Equal(t, 0, client.repliesCalls, "replies lookup is not needed when history finds the message")
+
+		require.NotNil(t, client.historyParams)
+		assert.Equal(t, channel, client.historyParams.ChannelID)
+		assert.Equal(t, ts, client.historyParams.Latest)
+		assert.Equal(t, ts, client.historyParams.Oldest)
+		assert.True(t, client.historyParams.Inclusive)
+		assert.Equal(t, 1, client.historyParams.Limit)
+
+		require.Len(t, result.Content, 1)
+		textContent, ok := result.Content[0].(mcp.TextContent)
+		require.True(t, ok)
+		assert.Contains(t, textContent.Text, channel)
+		assert.Contains(t, textContent.Text, ts)
+	})
+
+	t.Run("delete removes an own thread reply found through conversations.replies", func(t *testing.T) {
+		const parentTS = "1699999999.000100"
+		client := &fakeMessageWriteSlackAPI{
+			historyMessages: nil,
+			replyMessages:   []slack.Message{slackMessage(other, parentTS), slackMessage(me, ts)},
+		}
+
+		result, err := newMessageWriteTestHandler().deleteOwnMessage(context.Background(), client, me, deleteParams)
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, 1, client.historyCalls)
+		assert.Equal(t, 1, client.repliesCalls)
+		assert.Equal(t, 1, client.deleteCalls)
+
+		require.NotNil(t, client.repliesParams)
+		assert.Equal(t, channel, client.repliesParams.ChannelID)
+		assert.Equal(t, ts, client.repliesParams.Timestamp)
+
+		require.Len(t, result.Content, 1)
+		textContent, ok := result.Content[0].(mcp.TextContent)
+		require.True(t, ok)
+		assert.Contains(t, textContent.Text, channel)
+		assert.Contains(t, textContent.Text, ts)
+	})
+
+	t.Run("thread reply authored by another user is refused", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{replyMessages: []slack.Message{slackMessage(me, "1699999999.000100"), slackMessage(other, ts)}}
+
+		_, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, me, updateParams)
+		require.Error(t, err)
+		assert.Equal(t, notOwned, err.Error())
+		assert.Equal(t, 0, client.updateCalls)
+	})
+
+	t.Run("message not found", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{repliesErr: errors.New("thread_not_found")}
+
+		_, err := newMessageWriteTestHandler().deleteOwnMessage(context.Background(), client, me, deleteParams)
+		require.Error(t, err)
+		assert.Equal(t, fmt.Sprintf("message %s not found in %s", ts, channel), err.Error())
+		assert.Equal(t, 0, client.deleteCalls)
+	})
+
+	t.Run("message not found when replies has no exact match", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{replyMessages: []slack.Message{slackMessage(me, "1699999999.000100")}}
+
+		_, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, me, updateParams)
+		require.Error(t, err)
+		assert.Equal(t, fmt.Sprintf("message %s not found in %s", ts, channel), err.Error())
+		assert.Equal(t, 0, client.updateCalls)
+	})
+
+	t.Run("lookup failure is reported and nothing is modified", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{historyErr: errors.New("channel_not_found")}
+
+		_, err := newMessageWriteTestHandler().updateOwnMessage(context.Background(), client, me, updateParams)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "channel_not_found")
+		assert.Equal(t, 0, client.repliesCalls)
+		assert.Equal(t, 0, client.updateCalls)
+	})
+
+	t.Run("replies lookup failure is reported and nothing is modified", func(t *testing.T) {
+		client := &fakeMessageWriteSlackAPI{repliesErr: errors.New("ratelimited")}
+
+		_, err := newMessageWriteTestHandler().deleteOwnMessage(context.Background(), client, me, deleteParams)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "ratelimited")
+		assert.Equal(t, 0, client.deleteCalls)
+	})
 }

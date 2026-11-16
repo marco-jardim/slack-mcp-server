@@ -258,7 +258,9 @@ func IsUnfurlingEnabled(text string, opt string, logger *zap.Logger) bool {
 		allowed[d] = struct{}{}
 	}
 
-	urlRe := regexp.MustCompile(`https?://[^\s]+`)
+	// "|" and ">" end a URL so that Slack links (<https://host/path|label>) are not read as
+	// one long URL whose host would include the label.
+	urlRe := regexp.MustCompile(`https?://[^\s|>]+`)
 	urls := urlRe.FindAllString(text, -1)
 	for _, rawURL := range urls {
 		u, err := url.Parse(rawURL)

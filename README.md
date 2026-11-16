@@ -15,7 +15,7 @@ This feature-rich Slack MCP Server has:
 - **Smart History**: Fetch messages with pagination by date (d1, 7d, 1m) or message count.
 - **Unread Messages**: Get all unread messages across channels efficiently with priority sorting (DMs > partner channels > internal), @mention filtering, and mark-as-read support.
 - **Search Messages**: Search messages in channels, threads, and DMs using various filters like date, user, and content.
-- **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions.
+- **Safe Message Posting**: The `conversations_add_message` tool is disabled by default for safety. Enable it via an environment variable, with optional channel restrictions. The same variable enables `conversations_update_message` and `conversations_delete_message`, which only edit or delete messages authored by the authenticated user.
 - **DM and Group DM support**: Retrieve direct messages and group direct messages.
 - **Embedded user information**: Embed user information in messages, for better context.
 - **Cache support**: Cache users and channels for faster access.
@@ -57,7 +57,20 @@ Add a message to a public channel, private channel, or direct message (DM, or IM
   - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
   - `thread_ts` (string, optional): Unique identifier of either a thread’s parent message or a message in the thread_ts must be the timestamp in format `1234567890.123456` of an existing message with 0 or more replies. Optional, if not provided the message will be added to the channel itself, otherwise it will be added to the thread.
   - `payload` (string, required): Message payload in specified content_type format. Example: 'Hello, world!' for text/plain or '# Hello, world!' for text/markdown.
-  - `content_type` (string, default: "text/markdown"): Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'.
+  - `content_type` (string, default: "text/markdown"): Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Both values are handled the same way, see [Automatic message formatting](#automatic-message-formatting).
+  - `blocks` (string, optional): Raw Slack Block Kit JSON array. When provided, it takes precedence over `payload`/`content_type` for rendering and the text becomes the notification fallback text.
+
+#### Automatic message formatting
+
+`conversations_add_message` and `conversations_update_message` always convert outgoing text to valid Slack mrkdwn (there is no setting to turn this off). The input format is detected, so Markdown, HTML and text that is already Slack mrkdwn all work. Slack-native input without Markdown syntax is sent byte-for-byte as written, and converting twice gives the same result as converting once.
+
+- **Both content types are converted.** `text/markdown` and `text/plain` are sent as mrkdwn text with the same conversion; the text is no longer turned into Block Kit blocks, and `text/plain` no longer disables Slack's own formatting. When `blocks` is provided, the text is only the notification fallback and is converted too.
+- **Never touched:** fenced code blocks and inline code (only `&`, `<`, `>` are escaped inside them), Slack tokens (`<@U…>`, `<#C…|name>`, `<!here>`, `<!channel>`, `<!everyone>`, `<!subteam^…>`, `<!date^…>`, `<https://…|label>`, `<mailto:…|label>`), `:emoji:` names, and a blockquote `>` at the start of a line.
+- **Always converted** (unambiguous): `**x**` and `__x__` → `*x*`; `***x***` → `*_x_*`; `~~x~~` → `~x~`; `[text](url)` and `![alt](url)` → `<url|text>`; headings (`#` to `######`) → a bold line; `-`, `+` and `*` list markers → `•`; horizontal rules → `────────`; common HTML (`<b>`, `<strong>`, `<i>`, `<em>`, `<s>`, `<del>`, `<code>`, `<pre>`, `<a href>`, `<br>`, `<p>`, `<ul>`, `<ol>`, `<li>`, `<h1>`–`<h6>`) and any other known HTML tag is stripped; HTML entities such as `&nbsp;` and `&amp;` are decoded. A language tag after an opening code fence (for example ```` ```go ````) is dropped because Slack would print it as code.
+- **Detection rule for `*x*`.** A single asterisk is italic in Markdown but bold in Slack. If the text contains any Markdown signal (`**bold**`, `__bold__`, `~~strike~~`, `[text](url)`, a heading line, a `- ` or `+ ` list item, or an HTML tag), it is treated as Markdown and `*x*` becomes `_x_`. Otherwise it is treated as Slack mrkdwn and `*x*` stays bold.
+- **Escaping.** `&`, `<` and `>` become `&amp;`, `&lt;` and `&gt;` outside Slack tokens; existing entities are not escaped twice.
+- **Block Kit.** In `blocks`, every text object of type `mrkdwn` (section text and fields, context elements, nested text objects) is converted. `plain_text` objects and `rich_text` blocks are left as they are.
+- **Not converted:** GFM tables (left as they are), Markdown backslash escapes and reference-style links. Links with a relative URL or an unsupported scheme become `text (url)`.
 
 ### 4. conversations_search_messages
 Search messages in a public channel, private channel, or direct message (DM, or IM) conversation using filters. All filters are optional, if not provided then search_query is required.
@@ -236,6 +249,35 @@ Clear all completed saved items from the "Save for Later" panel. This is a bulk 
 
 - **Parameters:** None.
 
+### 19. conversations_update_message
+Edit an existing message in a public channel, private channel, or direct message (DM, or IM) conversation by `channel_id` and `ts`. The message may be a top-level message or a thread reply.
+
+> **Note:** This tool follows the same permission model as `conversations_add_message`: it is disabled by default and is registered only when `SLACK_MCP_ADD_MESSAGE_TOOL` is set (or when it is explicitly listed in `SLACK_MCP_ENABLED_TOOLS`), and the same channel allowlist/blocklist applies. It **only edits messages authored by the authenticated user**: before calling `chat.update` the server fetches the message and refuses if its author is anyone else, even when the token belongs to a workspace admin.
+
+- **Parameters:**
+  - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
+  - `ts` (string, required): Timestamp of the message to edit, in format `1234567890.123456`.
+  - `text` (string, optional): New message text in the specified `content_type` format. At least one of `text` or `blocks` is required.
+  - `content_type` (string, default: "text/markdown"): Content type of the message. Allowed values: 'text/markdown', 'text/plain'. Ignored when `blocks` is provided. The text is converted to Slack mrkdwn automatically in both cases, see [Automatic message formatting](#automatic-message-formatting).
+  - `blocks` (string, optional): Raw Slack Block Kit JSON array. When provided, it takes precedence over `text`/`content_type` for rendering and `text` becomes the notification fallback text.
+
+- **Returns:** a confirmation including the channel ID and the message `ts`.
+
+> **Required OAuth scopes:** `chat:write`, plus the `*:history` scope of the conversation type (used to verify the message author).
+
+### 20. conversations_delete_message
+Delete an existing message in a public channel, private channel, or direct message (DM, or IM) conversation by `channel_id` and `ts`. The message may be a top-level message or a thread reply.
+
+> **Note:** This tool follows the same permission model as `conversations_add_message`: it is disabled by default and is registered only when `SLACK_MCP_ADD_MESSAGE_TOOL` is set (or when it is explicitly listed in `SLACK_MCP_ENABLED_TOOLS`), and the same channel allowlist/blocklist applies. It **only deletes messages authored by the authenticated user**: before calling `chat.delete` the server fetches the message and refuses if its author is anyone else, even when the token belongs to a workspace admin.
+
+- **Parameters:**
+  - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
+  - `ts` (string, required): Timestamp of the message to delete, in format `1234567890.123456`.
+
+- **Returns:** a confirmation including the channel ID and the message `ts`.
+
+> **Required OAuth scopes:** `chat:write`, plus the `*:history` scope of the conversation type (used to verify the message author).
+
 ## Resources
 
 The Slack MCP Server exposes two special directory resources for easy access to workspace metadata:
@@ -287,7 +329,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_SERVER_CA`             | No        | `nil`                     | Path to CA certificate                                                                                                                                                                                                                                                                    |
 | `SLACK_MCP_SERVER_CA_TOOLKIT`     | No        | `nil`                     | Inject HTTPToolkit CA certificate to root trust-store for MitM debugging                                                                                                                                                                                                                  |
 | `SLACK_MCP_SERVER_CA_INSECURE`    | No        | `false`                   | Trust all insecure requests (NOT RECOMMENDED)                                                                                                                                                                                                                                             |
-| `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message` by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
+| `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message`, and editing/deleting your own messages via `conversations_update_message` and `conversations_delete_message`, by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. The same channel policy applies to all three tools. If empty, each tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `nil`                     | When `conversations_add_message` is enabled (via `SLACK_MCP_ADD_MESSAGE_TOOL` or `SLACK_MCP_ENABLED_TOOLS`), setting this to `true` will automatically mark sent messages as read.                                                                                                        |
 | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
 | `SLACK_MCP_REACTION_TOOL`        | No        | `nil`                     | Enable `reactions_add` and `reactions_remove` tools by setting to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tools are only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
@@ -297,7 +339,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
 | `SLACK_MCP_GOVSLACK`              | No        | `nil`                     | Set to `true` to enable [GovSlack](https://slack.com/solutions/govslack) mode. Routes API calls to `slack-gov.com` endpoints instead of `slack.com` for FedRAMP-compliant government workspaces.                                                                                          |
-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
+| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
 
 *You need one of: `xoxp` (user), `xoxb` (bot), or both `xoxc`/`xoxd` tokens for authentication.
 

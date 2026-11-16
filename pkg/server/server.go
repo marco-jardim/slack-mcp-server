@@ -28,6 +28,8 @@ const (
 	ToolConversationsHistory        = "conversations_history"
 	ToolConversationsReplies        = "conversations_replies"
 	ToolConversationsAddMessage     = "conversations_add_message"
+	ToolConversationsUpdateMessage  = "conversations_update_message"
+	ToolConversationsDeleteMessage  = "conversations_delete_message"
 	ToolReactionsAdd                = "reactions_add"
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
@@ -53,6 +55,8 @@ var ValidToolNames = []string{
 	ToolConversationsHistory,
 	ToolConversationsReplies,
 	ToolConversationsAddMessage,
+	ToolConversationsUpdateMessage,
+	ToolConversationsDeleteMessage,
 	ToolReactionsAdd,
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
@@ -193,12 +197,58 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 			),
 			mcp.WithString("content_type",
 				mcp.DefaultString("text/markdown"),
-				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Ignored when blocks is provided."),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Ignored when blocks is provided. In both cases the text is detected as Markdown, HTML or Slack mrkdwn and converted to valid Slack mrkdwn before it is sent."),
 			),
 			mcp.WithString("blocks",
 				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text."),
 			),
 		), conversationsHandler.ConversationsAddMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsUpdateMessage, enabledTools, "SLACK_MCP_ADD_MESSAGE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsUpdateMessage,
+			mcp.WithDescription("Edit an existing message in a public channel, private channel, or direct message (DM, or IM) conversation by channel_id and ts. "+
+				"Only messages authored by the authenticated user can be edited; any other message is refused, even when the token belongs to a workspace admin. "+
+				"Respects the SLACK_MCP_ADD_MESSAGE_TOOL channel policy (enabled and restricted to the same channels as conversations_add_message)."),
+			mcp.WithTitleAnnotation("Edit Message"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("ts",
+				mcp.Required(),
+				mcp.Description("Timestamp of the message to edit, in format 1234567890.123456. The message may be a top-level message or a thread reply."),
+			),
+			mcp.WithString("text",
+				mcp.Description("New message text in specified content_type format. Example: 'Hello, world!' for text/plain or '# Hello, world!' for text/markdown. At least one of text or blocks is required."),
+			),
+			mcp.WithString("content_type",
+				mcp.DefaultString("text/markdown"),
+				mcp.Description("Content type of the message. Default is 'text/markdown'. Allowed values: 'text/markdown', 'text/plain'. Ignored when blocks is provided. In both cases the text is detected as Markdown, HTML or Slack mrkdwn and converted to valid Slack mrkdwn before it is sent."),
+			),
+			mcp.WithString("blocks",
+				mcp.Description("Raw Slack Block Kit JSON array for rich message formatting (rich_text lists, code blocks, etc.). When provided, this takes precedence over text/content_type for rendering. The text parameter becomes the notification fallback text. At least one of text or blocks is required."),
+			),
+		), conversationsHandler.ConversationsUpdateMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsDeleteMessage, enabledTools, "SLACK_MCP_ADD_MESSAGE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsDeleteMessage,
+			mcp.WithDescription("Delete an existing message in a public channel, private channel, or direct message (DM, or IM) conversation by channel_id and ts. "+
+				"Only messages authored by the authenticated user can be deleted; any other message is refused, even when the token belongs to a workspace admin. "+
+				"Respects the SLACK_MCP_ADD_MESSAGE_TOOL channel policy (enabled and restricted to the same channels as conversations_add_message)."),
+			mcp.WithTitleAnnotation("Delete Message"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("ts",
+				mcp.Required(),
+				mcp.Description("Timestamp of the message to delete, in format 1234567890.123456. The message may be a top-level message or a thread reply."),
+			),
+		), conversationsHandler.ConversationsDeleteMessageHandler)
 	}
 
 	if shouldAddTool(ToolReactionsAdd, enabledTools, "SLACK_MCP_REACTION_TOOL") {

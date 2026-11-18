@@ -233,6 +233,9 @@ type SlackAPI interface {
 	GetFileInfoContext(ctx context.Context, fileID string, count, page int) (*slack.File, []slack.Comment, *slack.Paging, error)
 	GetFileContext(ctx context.Context, downloadURL string, writer io.Writer) error
 
+	// Used to upload files (files.getUploadURLExternal + files.completeUploadExternal)
+	UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error)
+
 	// Used to get channel info (for unread counts with xoxp tokens)
 	GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error)
 
@@ -561,6 +564,13 @@ func (c *MCPSlackClient) GetFileInfoContext(ctx context.Context, fileID string, 
 
 func (c *MCPSlackClient) GetFileContext(ctx context.Context, downloadURL string, writer io.Writer) error {
 	return c.slackClient.GetFileContext(ctx, downloadURL, writer)
+}
+
+// UploadFileContext uploads a file through the external upload flow
+// (files.getUploadURLExternal, upload to the returned URL, files.completeUploadExternal)
+// and shares it to params.Channel when set.
+func (c *MCPSlackClient) UploadFileContext(ctx context.Context, params slack.UploadFileParameters) (*slack.FileSummary, error) {
+	return c.slackClient.UploadFileContext(ctx, params)
 }
 
 func (c *MCPSlackClient) GetConversationInfoContext(ctx context.Context, input *slack.GetConversationInfoInput) (*slack.Channel, error) {

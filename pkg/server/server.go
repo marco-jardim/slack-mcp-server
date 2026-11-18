@@ -30,6 +30,7 @@ const (
 	ToolConversationsAddMessage     = "conversations_add_message"
 	ToolConversationsUpdateMessage  = "conversations_update_message"
 	ToolConversationsDeleteMessage  = "conversations_delete_message"
+	ToolConversationsAddFile        = "conversations_add_file"
 	ToolReactionsAdd                = "reactions_add"
 	ToolReactionsRemove             = "reactions_remove"
 	ToolAttachmentGetData           = "attachment_get_data"
@@ -57,6 +58,7 @@ var ValidToolNames = []string{
 	ToolConversationsAddMessage,
 	ToolConversationsUpdateMessage,
 	ToolConversationsDeleteMessage,
+	ToolConversationsAddFile,
 	ToolReactionsAdd,
 	ToolReactionsRemove,
 	ToolAttachmentGetData,
@@ -249,6 +251,42 @@ func NewMCPServer(provider *provider.ApiProvider, logger *zap.Logger, enabledToo
 				mcp.Description("Timestamp of the message to delete, in format 1234567890.123456. The message may be a top-level message or a thread reply."),
 			),
 		), conversationsHandler.ConversationsDeleteMessageHandler)
+	}
+
+	if shouldAddTool(ToolConversationsAddFile, enabledTools, "SLACK_MCP_ADD_FILE_TOOL") {
+		s.AddTool(mcp.NewTool(ToolConversationsAddFile,
+			mcp.WithDescription("Upload a file to a public channel, private channel, or direct message (DM, or IM) conversation by channel_id, optionally into a thread and with a comment. "+
+				"Provide exactly one of file_path (absolute path of a local file) or content (inline text or base64). "+
+				"The Slack token needs the files:write scope. Respects the SLACK_MCP_ADD_FILE_TOOL channel policy and the SLACK_MCP_ADD_FILE_MAX_BYTES size limit (default 50 MiB)."),
+			mcp.WithTitleAnnotation("Upload File"),
+			mcp.WithDestructiveHintAnnotation(true),
+			mcp.WithString("channel_id",
+				mcp.Required(),
+				mcp.Description("ID of the channel in format Cxxxxxxxxxx or its name starting with #... or @... aka #general or @username_dm."),
+			),
+			mcp.WithString("file_path",
+				mcp.Description("Absolute path of a local file to upload. Mutually exclusive with content. Must be a regular file, not a directory."),
+			),
+			mcp.WithString("content",
+				mcp.Description("Inline file content to upload, interpreted according to content_encoding. Mutually exclusive with file_path. Requires filename."),
+			),
+			mcp.WithString("content_encoding",
+				mcp.DefaultString("text"),
+				mcp.Description("How content is encoded. Allowed values: 'text' (default, UTF-8 text as-is) or 'base64' (for binary files). Only applies to content."),
+			),
+			mcp.WithString("filename",
+				mcp.Description("Name of the file in Slack. Required when using content; defaults to the base name of file_path."),
+			),
+			mcp.WithString("title",
+				mcp.Description("Optional title of the file shown in Slack."),
+			),
+			mcp.WithString("initial_comment",
+				mcp.Description("Optional message posted together with the file."),
+			),
+			mcp.WithString("thread_ts",
+				mcp.Description("Optional timestamp of a thread's parent message in format 1234567890.123456. If provided the file is uploaded into that thread, otherwise into the channel itself."),
+			),
+		), conversationsHandler.ConversationsAddFileHandler)
 	}
 
 	if shouldAddTool(ToolReactionsAdd, enabledTools, "SLACK_MCP_REACTION_TOOL") {

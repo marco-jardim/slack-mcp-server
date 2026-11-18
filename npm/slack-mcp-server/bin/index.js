@@ -31,6 +31,9 @@ function resolveBinaryPath() {
         if (process.env.SLACK_MCP_ADD_MESSAGE_TOOL === '${user_config.add_message_tool}') {
             process.env.SLACK_MCP_ADD_MESSAGE_TOOL = '';
         }
+        if (process.env.SLACK_MCP_ADD_FILE_TOOL === '${user_config.add_file_tool}') {
+            process.env.SLACK_MCP_ADD_FILE_TOOL = '';
+        }
     }
 
     const key = `${process.platform}_${process.arch}`;

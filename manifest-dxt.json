@@ -34,6 +34,7 @@
         "SLACK_MCP_XOXB_TOKEN": "${user_config.xoxb_token}",
         "SLACK_MCP_USER_AGENT": "${user_config.user_agent}",
         "SLACK_MCP_ADD_MESSAGE_TOOL": "${user_config.add_message_tool}",
+        "SLACK_MCP_ADD_FILE_TOOL": "${user_config.add_file_tool}",
         "SLACK_MCP_USERS_CACHE": "${HOME}/.users_cache.json",
         "SLACK_MCP_CHANNELS_CACHE": "${HOME}/.channels_cache.json"
       }
@@ -97,6 +98,14 @@
       "type": "string",
       "title": "Value for add_message_tool",
       "description": "Enable the `conversations_add_message`, `conversations_update_message` and `conversations_delete_message` tools. These tools allow the server to post messages to channels and to edit or delete messages authored by the authenticated user. They are disabled by default for safety reasons. If you want to enable them, set this value to `true`. You can also restrict them to specific channels by providing a comma-separated list of channel IDs.",
+      "default": "",
+      "sensitive": false,
+      "required": false
+    },
+    "add_file_tool": {
+      "type": "string",
+      "title": "Value for add_file_tool",
+      "description": "Enable the `conversations_add_file` tool, which uploads files to channels, DMs and threads (requires the `files:write` scope). It is disabled by default for safety reasons. If you want to enable it, set this value to `true`. You can also restrict it to specific channels by providing a comma-separated list of channel IDs.",
       "default": "",
       "sensitive": false,
       "required": false

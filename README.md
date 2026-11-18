@@ -278,6 +278,37 @@ Delete an existing message in a public channel, private channel, or direct messa
 
 > **Required OAuth scopes:** `chat:write`, plus the `*:history` scope of the conversation type (used to verify the message author).
 
+### 21. conversations_add_file
+Upload a file to a public channel, private channel, or direct message (DM, or IM) conversation by `channel_id`, optionally into a thread and with a comment. The file comes either from a local path or from inline content. The upload uses Slack's external upload flow (`files.getUploadURLExternal` + `files.completeUploadExternal`).
+
+> **Note:** This tool is disabled by default and is registered only when `SLACK_MCP_ADD_FILE_TOOL` is set (or when it is explicitly listed in `SLACK_MCP_ENABLED_TOOLS`). `SLACK_MCP_ADD_FILE_TOOL` uses the same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL` (`true`/`1` for all channels, a comma-separated allowlist of channel IDs, or a `!`-prefixed blocklist) but is independent of it. Files larger than `SLACK_MCP_ADD_FILE_MAX_BYTES` (default 50 MiB) are refused.
+
+- **Parameters:**
+  - `channel_id` (string, required): ID of the channel in format `Cxxxxxxxxxx` or its name starting with `#...` or `@...` aka `#general` or `@username_dm`.
+  - `file_path` (string, optional): Absolute path of a local file to upload. Must be a regular, non-empty file (not a directory). Exactly one of `file_path` or `content` is required.
+  - `content` (string, optional): Inline file content, interpreted according to `content_encoding`. Requires `filename`.
+  - `content_encoding` (string, default: "text"): How `content` is encoded. Allowed values: 'text' (as-is), 'base64' (for binary data). Only applies to `content`.
+  - `filename` (string, optional): Name of the file in Slack, without path separators. Required with `content`; defaults to the base name of `file_path`.
+  - `title` (string, optional): Title of the file shown in Slack.
+  - `initial_comment` (string, optional): Message posted together with the file.
+  - `thread_ts` (string, optional): Timestamp of a thread's parent message in format `1234567890.123456`. If provided the file is uploaded into that thread.
+
+- **Returns:** a JSON object with `file_id`, `name`, `title`, `permalink` (when Slack returns it; otherwise a `warning` explains why it is missing), `channel_id`, `thread_ts` (when set) and `size_bytes`.
+
+> **Required OAuth scopes:** `files:write`. Slack errors such as `missing_scope` are returned with a hint naming the missing scope.
+
+### 22. attachment_get_data
+Download an attachment's content by file ID. Attachment IDs (with filenames) can be found in the `attachmentIDs` field of message metadata when `fileCount` > 0.
+
+> **Note:** This tool is disabled by default and is registered only when `SLACK_MCP_ATTACHMENT_TOOL` is set (or when it is explicitly listed in `SLACK_MCP_ENABLED_TOOLS`). It does not support channel-level restrictions. Files larger than 5 MB are refused.
+
+- **Parameters:**
+  - `file_id` (string, required): The ID of the attachment to download, in format `Fxxxxxxxxxx`.
+
+- **Returns:** image files (`image/*`) are returned as native MCP image content with a JSON metadata line (`file_id`, `filename`, `mimetype`, `size`). Other files are returned as a JSON object with `file_id`, `filename`, `mimetype`, `size`, `encoding` and `content`: text files (for example `text/*`, JSON, XML) are returned as-is with `encoding` set to `none`, any other file is returned base64-encoded with `encoding` set to `base64`.
+
+> **Required OAuth scopes:** `files:read`.
+
 ## Resources
 
 The Slack MCP Server exposes two special directory resources for easy access to workspace metadata:
@@ -332,6 +363,8 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_ADD_MESSAGE_TOOL`      | No        | `nil`                     | Enable message posting via `conversations_add_message`, and editing/deleting your own messages via `conversations_update_message` and `conversations_delete_message`, by setting it to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. The same channel policy applies to all three tools. If empty, each tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_ADD_MESSAGE_MARK`      | No        | `nil`                     | When `conversations_add_message` is enabled (via `SLACK_MCP_ADD_MESSAGE_TOOL` or `SLACK_MCP_ENABLED_TOOLS`), setting this to `true` will automatically mark sent messages as read.                                                                                                        |
 | `SLACK_MCP_ADD_MESSAGE_UNFURLING` | No        | `nil`                     | Enable to let Slack unfurl posted links or set comma-separated list of domains e.g. `github.com,slack.com` to whitelist unfurling only for them. If text contains whitelisted and unknown domain unfurling will be disabled for security reasons.                                         |
+| `SLACK_MCP_ADD_FILE_TOOL`         | No        | `nil`                     | Enable file uploads via `conversations_add_file` by setting it to `true`/`1` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. Same syntax as `SLACK_MCP_ADD_MESSAGE_TOOL`, but independent of it. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. Requires the `files:write` scope. |
+| `SLACK_MCP_ADD_FILE_MAX_BYTES`    | No        | `52428800` (50 MiB)       | Maximum size in bytes of a file uploaded by `conversations_add_file` (checked before reading a local file and against the decoded length of inline content). Invalid or non-positive values fall back to the default.                                                                      |
 | `SLACK_MCP_REACTION_TOOL`        | No        | `nil`                     | Enable `reactions_add` and `reactions_remove` tools by setting to `true` for all channels, a comma-separated list of channel IDs to whitelist specific channels, or use `!` before a channel ID to allow all except specified ones. If empty, the tools are only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_ATTACHMENT_TOOL`      | No        | `nil`                     | Enable the `attachment_get_data` tool by setting to `true`, `1`, or `yes`. Does not support channel-level restrictions. If empty, the tool is only registered when explicitly listed in `SLACK_MCP_ENABLED_TOOLS`. |
 | `SLACK_MCP_MARK_TOOL`             | No        | `nil`                     | Enable the `conversations_mark` tool by setting to `true` or `1`. Disabled by default to prevent accidental marking of messages as read.                                                                                                                                                  |
@@ -339,7 +372,7 @@ Fetches a CSV directory of all users in the workspace.
 | `SLACK_MCP_CHANNELS_CACHE`        | No        | `~/Library/Caches/slack-mcp-server/channels_cache_v2.json` (macOS)<br>`~/.cache/slack-mcp-server/channels_cache_v2.json` (Linux)<br>`%LocalAppData%/slack-mcp-server/channels_cache_v2.json` (Windows) | Path to the channels cache file. Used to cache Slack channel information to avoid repeated API calls on startup. |
 | `SLACK_MCP_LOG_LEVEL`             | No        | `info`                    | Log-level for stdout or stderr. Valid values are: `debug`, `info`, `warn`, `error`, `panic` and `fatal`                                                                                                                                                                                   |
 | `SLACK_MCP_GOVSLACK`              | No        | `nil`                     | Set to `true` to enable [GovSlack](https://slack.com/solutions/govslack) mode. Routes API calls to `slack-gov.com` endpoints instead of `slack.com` for FedRAMP-compliant government workspaces.                                                                                          |
-| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
+| `SLACK_MCP_ENABLED_TOOLS`         | No        | `nil`                     | Comma-separated list of tools to register. If empty, all read-only tools and usergroups tools are registered; write tools (`conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `conversations_add_file`, `reactions_add`, `reactions_remove`, `attachment_get_data`) require their specific env var OR must be explicitly listed here. When a write tool is listed here, it's enabled without channel restrictions. Available tools: `conversations_history`, `conversations_replies`, `conversations_add_message`, `conversations_update_message`, `conversations_delete_message`, `conversations_add_file`, `reactions_add`, `reactions_remove`, `attachment_get_data`, `conversations_search_messages`, `channels_list`, `usergroups_list`, `usergroups_me`, `usergroups_create`, `usergroups_update`, `usergroups_users_update`. |
 
 *You need one of: `xoxp` (user), `xoxb` (bot), or both `xoxc`/`xoxd` tokens for authentication.
 

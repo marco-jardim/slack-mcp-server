@@ -120,6 +120,9 @@ const (
 	deleteMessageToolName = "conversations_delete_message"
 )
 
+// addMessagePolicyEnv is the environment variable holding the message write channel policy.
+const addMessagePolicyEnv = "SLACK_MCP_ADD_MESSAGE_TOOL"
+
 type addReactionParams struct {
 	channel   string
 	timestamp string
@@ -1724,7 +1727,7 @@ func isChannelAllowedForConfig(channel, config string) bool {
 }
 
 func isChannelAllowed(channel string) bool {
-	return isChannelAllowedForConfig(channel, os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL"))
+	return isChannelAllowedForConfig(channel, os.Getenv(addMessagePolicyEnv))
 }
 
 func (ch *ConversationsHandler) resolveChannelID(ctx context.Context, channel string) (string, error) {
@@ -2104,22 +2107,20 @@ func (ch *ConversationsHandler) parseParamsToolDeleteMessage(ctx context.Context
 	}, nil
 }
 
-// parseMessageWriteTarget applies the SLACK_MCP_ADD_MESSAGE_TOOL policy shared with
-// conversations_add_message and returns the resolved channel ID and the message ts.
-func (ch *ConversationsHandler) parseMessageWriteTarget(ctx context.Context, request mcp.CallToolRequest, toolName string) (string, string, error) {
-	toolConfig := os.Getenv("SLACK_MCP_ADD_MESSAGE_TOOL")
+// resolveAuthorizedWriteChannel applies a channel write policy and returns the resolved
+// channel ID. policyEnv names the environment variable holding the policy, which uses the
+// SLACK_MCP_ADD_MESSAGE_TOOL syntax: empty (tool must then be listed in
+// SLACK_MCP_ENABLED_TOOLS, and every channel is allowed), "true"/"1" (all channels), a
+// comma-separated allowlist, or a "!"-prefixed blocklist. disabledMsg is the error returned
+// when the policy is empty and toolName is not listed in SLACK_MCP_ENABLED_TOOLS.
+func (ch *ConversationsHandler) resolveAuthorizedWriteChannel(ctx context.Context, request mcp.CallToolRequest, toolName, policyEnv, disabledMsg string) (string, error) {
+	toolConfig := os.Getenv(policyEnv)
 	enabledTools := os.Getenv("SLACK_MCP_ENABLED_TOOLS")
 
 	if toolConfig == "" {
 		if !strings.Contains(enabledTools, toolName) {
 			ch.logger.Error("Message write tool disabled by default", zap.String("tool", toolName))
-			return "", "", fmt.Errorf(
-				"by default, the %s tool is disabled to guard Slack workspaces against accidental changes. "+
-					"To enable it, set the SLACK_MCP_ADD_MESSAGE_TOOL environment variable to true, 1, or comma separated list of channels "+
-					"to limit where the MCP can modify messages, e.g. 'SLACK_MCP_ADD_MESSAGE_TOOL=C1234567890,D0987654321', 'SLACK_MCP_ADD_MESSAGE_TOOL=!C1234567890' "+
-					"to enable all except one or 'SLACK_MCP_ADD_MESSAGE_TOOL=true' for all channels and DMs",
-				toolName,
-			)
+			return "", errors.New(disabledMsg)
 		}
 		toolConfig = "true"
 	}
@@ -2127,16 +2128,35 @@ func (ch *ConversationsHandler) parseMessageWriteTarget(ctx context.Context, req
 	channel := request.GetString("channel_id", "")
 	if channel == "" {
 		ch.logger.Error("channel_id missing in message write params", zap.String("tool", toolName))
-		return "", "", errors.New("channel_id must be a string")
+		return "", errors.New("channel_id must be a string")
 	}
 	channel, err := ch.resolveChannelID(ctx, channel)
 	if err != nil {
 		ch.logger.Error("Channel not found", zap.String("channel", channel), zap.Error(err))
-		return "", "", err
+		return "", err
 	}
-	if !isChannelAllowed(channel) {
+	if !isChannelAllowedForConfig(channel, toolConfig) {
 		ch.logger.Warn("Message write tool not allowed for channel", zap.String("tool", toolName), zap.String("channel", channel), zap.String("policy", toolConfig))
-		return "", "", fmt.Errorf("%s tool is not allowed for channel %q, applied policy: %s", toolName, channel, toolConfig)
+		return "", fmt.Errorf("%s tool is not allowed for channel %q, applied policy: %s", toolName, channel, toolConfig)
+	}
+
+	return channel, nil
+}
+
+// parseMessageWriteTarget applies the SLACK_MCP_ADD_MESSAGE_TOOL policy shared with
+// conversations_add_message and returns the resolved channel ID and the message ts.
+func (ch *ConversationsHandler) parseMessageWriteTarget(ctx context.Context, request mcp.CallToolRequest, toolName string) (string, string, error) {
+	disabledMsg := fmt.Sprintf(
+		"by default, the %s tool is disabled to guard Slack workspaces against accidental changes. "+
+			"To enable it, set the SLACK_MCP_ADD_MESSAGE_TOOL environment variable to true, 1, or comma separated list of channels "+
+			"to limit where the MCP can modify messages, e.g. 'SLACK_MCP_ADD_MESSAGE_TOOL=C1234567890,D0987654321', 'SLACK_MCP_ADD_MESSAGE_TOOL=!C1234567890' "+
+			"to enable all except one or 'SLACK_MCP_ADD_MESSAGE_TOOL=true' for all channels and DMs",
+		toolName,
+	)
+
+	channel, err := ch.resolveAuthorizedWriteChannel(ctx, request, toolName, addMessagePolicyEnv, disabledMsg)
+	if err != nil {
+		return "", "", err
 	}
 
 	ts := request.GetString("ts", "")

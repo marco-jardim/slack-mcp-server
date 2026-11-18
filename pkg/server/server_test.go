@@ -99,6 +99,7 @@ func TestValidToolNames(t *testing.T) {
 			ToolConversationsAddMessage:     true,
 			ToolConversationsUpdateMessage:  true,
 			ToolConversationsDeleteMessage:  true,
+			ToolConversationsAddFile:        true,
 			ToolReactionsAdd:                true,
 			ToolReactionsRemove:             true,
 			ToolAttachmentGetData:           true,
@@ -133,6 +134,7 @@ func TestValidToolNames(t *testing.T) {
 		assert.Equal(t, "conversations_add_message", ToolConversationsAddMessage)
 		assert.Equal(t, "conversations_update_message", ToolConversationsUpdateMessage)
 		assert.Equal(t, "conversations_delete_message", ToolConversationsDeleteMessage)
+		assert.Equal(t, "conversations_add_file", ToolConversationsAddFile)
 		assert.Equal(t, "reactions_add", ToolReactionsAdd)
 		assert.Equal(t, "reactions_remove", ToolReactionsRemove)
 		assert.Equal(t, "attachment_get_data", ToolAttachmentGetData)
@@ -255,6 +257,42 @@ func TestShouldAddTool_WriteTool_AddMessage(t *testing.T) {
 
 		result := shouldAddTool(ToolConversationsAddMessage, []string{ToolConversationsHistory}, "SLACK_MCP_ADD_MESSAGE_TOOL")
 		assert.False(t, result, "write tool should NOT be registered when not in explicit enabledTools list")
+	})
+}
+
+func TestUnitShouldAddToolAddFile(t *testing.T) {
+	const envName = "SLACK_MCP_ADD_FILE_TOOL"
+
+	t.Run("name is a valid tool name", func(t *testing.T) {
+		assert.NoError(t, ValidateEnabledTools([]string{ToolConversationsAddFile}))
+	})
+
+	t.Run("empty enabledTools and empty env var - not registered", func(t *testing.T) {
+		defer setEnv(envName, "")()
+		assert.False(t, shouldAddTool(ToolConversationsAddFile, []string{}, envName))
+	})
+
+	for _, envValue := range []string{"true", "1", "C123,C456", "!C123"} {
+		t.Run("empty enabledTools and env var "+envValue+" - registered", func(t *testing.T) {
+			defer setEnv(envName, envValue)()
+			assert.True(t, shouldAddTool(ToolConversationsAddFile, []string{}, envName))
+		})
+	}
+
+	t.Run("explicitly enabled with empty env var - registered", func(t *testing.T) {
+		defer setEnv(envName, "")()
+		assert.True(t, shouldAddTool(ToolConversationsAddFile, []string{ToolConversationsAddFile}, envName))
+	})
+
+	t.Run("enabledTools excludes tool - not registered even with env var", func(t *testing.T) {
+		defer setEnv(envName, "true")()
+		assert.False(t, shouldAddTool(ToolConversationsAddFile, []string{ToolConversationsHistory}, envName))
+	})
+
+	t.Run("is independent of SLACK_MCP_ADD_MESSAGE_TOOL", func(t *testing.T) {
+		defer setEnv(envName, "")()
+		defer setEnv("SLACK_MCP_ADD_MESSAGE_TOOL", "true")()
+		assert.False(t, shouldAddTool(ToolConversationsAddFile, []string{}, envName))
 	})
 }
 
